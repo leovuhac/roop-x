@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import psutil
 
+from enum import Enum
 from roop.ProcessOptions import ProcessOptions
 
 from roop.face_util import get_first_face, get_all_faces, rotate_image_180, rotate_anticlockwise, rotate_clockwise, clamp_cut_values
@@ -17,6 +18,15 @@ from queue import Queue
 from tqdm import tqdm
 from roop.ffmpeg_writer import FFMPEG_VideoWriter
 import roop.globals
+
+
+# Poor man's enum to be able to compare to int
+class eNoFaceAction():
+    USE_ORIGINAL_FRAME = 0
+    RETRY_ROTATED = 1
+    SKIP_FRAME = 2
+    SKIP_FRAME_IF_DISSIMILAR = 3
+
 
 
 def create_queue(temp_frame_paths: List[str]) -> Queue[str]:
@@ -64,55 +74,61 @@ class ProcessMgr():
     plugins =  { 
     'faceswap'          : 'FaceSwapInsightFace',
     'mask_clip2seg'     : 'Mask_Clip2Seg',
+    'mask_xseg'         : 'Mask_XSeg',
     'codeformer'        : 'Enhance_CodeFormer',
     'gfpgan'            : 'Enhance_GFPGAN',
     'dmdnet'            : 'Enhance_DMDNet',
     'gpen'              : 'Enhance_GPEN',
     'restoreformer++'   : 'Enhance_RestoreFormerPPlus',
+    'colorizer'         : 'Frame_Colorizer',
+    'filter_generic'    : 'Frame_Filter',
+    'removebg'          : 'Frame_Masking',
+    'upscale'           : 'Frame_Upscale'
     }
 
     def __init__(self, progress):
         if progress is not None:
             self.progress_gradio = progress
 
+    def reuseOldProcessor(self, name:str):
+        for p in self.processors:
+            if p.processorname == name:
+                return p
+            
+        return None
+
 
     def initialize(self, input_faces, target_faces, options):
         self.input_face_datas = input_faces
         self.target_face_datas = target_faces
         self.options = options
+        devicename = get_device()
 
         roop.globals.g_desired_face_analysis=["landmark_3d_68", "landmark_2d_106","detection","recognition"]
         if options.swap_mode == "all_female" or options.swap_mode == "all_male":
             roop.globals.g_desired_face_analysis.append("genderage")
 
-        processornames = options.processors.split(",")
-        devicename = get_device()
-        if len(self.processors) < 1:
-            for pn in processornames:
-                classname = self.plugins[pn]
+        for p in self.processors:
+            newp = next((x for x in options.processors.keys() if x == p.processorname), None)
+            if newp is None:
+                p.Release()
+                del p
+
+        newprocessors = []
+        for key, extoption in options.processors.items():
+            p = self.reuseOldProcessor(key)
+            if p is None:
+                classname = self.plugins[key]
                 module = 'roop.processors.' + classname
                 p = str_to_class(module, classname)
-                if p is not None:
-                    p.Initialize(devicename)
-                    self.processors.append(p)
-                else:
-                    print(f"Not using {module}")
-        else:
-            for i in range(len(self.processors) -1, -1, -1):
-                if not self.processors[i].processorname in processornames:
-                    self.processors[i].Release()
-                    del self.processors[i]
+            if p is not None:
+                extoption.update({"devicename": devicename})
+                p.Initialize(extoption)
+                newprocessors.append(p)
+            else:
+                print(f"Not using {module}")
+        self.processors = newprocessors
 
-            for i,pn in enumerate(processornames):
-                if i >= len(self.processors) or self.processors[i].processorname != pn:
-                    classname = self.plugins[pn]
-                    module = 'roop.processors.' + classname
-                    p = str_to_class(module, classname)
-                    if p is not None:
-                        p.Initialize(devicename)
-                        self.processors.insert(i, p)
-                    else:
-                        print(f"Not using {module}")
 
 
         if isinstance(self.options.imagemask, dict) and self.options.imagemask.get("layers") and len(self.options.imagemask["layers"]) > 0:
@@ -126,6 +142,13 @@ class ProcessMgr():
                 self.options.imagemask = cv2.cvtColor(self.options.imagemask, cv2.COLOR_GRAY2RGB)
             else:
                 self.options.imagemask = None
+
+        self.options.frame_processing = False
+        for p in self.processors:
+            if p.type.startswith("frame_"):
+                self.options.frame_processing = True
+
+            
  
 
 
@@ -154,7 +177,12 @@ class ProcessMgr():
             # Decode the byte array into an OpenCV image
             temp_frame = cv2.imdecode(np.fromfile(f, dtype=np.uint8), cv2.IMREAD_COLOR)
             if temp_frame is not None:
-                resimg = self.process_frame(temp_frame)
+                if self.options.frame_processing:
+                    for p in self.processors:
+                        frame = p.Run(temp_frame)
+                    resimg = frame
+                else:
+                    resimg = self.process_frame(temp_frame)
                 if resimg is not None:
                     i = source_files.index(f)
                     cv2.imwrite(target_files[i], resimg)
@@ -192,7 +220,12 @@ class ProcessMgr():
                 self.processed_queue[threadindex].put((False, None))
                 return
             else:
-                resimg = self.process_frame(frame)
+                if self.options.frame_processing:
+                    for p in self.processors:
+                        frame = p.Run(frame)
+                    resimg = frame
+                else:                            
+                    resimg = self.process_frame(frame)
                 self.processed_queue[threadindex].put((True, resimg))
                 del frame
                 progress()
@@ -221,6 +254,16 @@ class ProcessMgr():
         frame_count = (frame_end - frame_start) + 1
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        processed_resolution = None
+        for p in self.processors:
+            if hasattr(p, 'getProcessedResolution'):
+                processed_resolution = p.getProcessedResolution(width, height)
+                print(f"Processed resolution: {processed_resolution}")
+        if processed_resolution is not None:
+            width = processed_resolution[0]
+            height = processed_resolution[1]
+
 
         self.total_frames = frame_count
         self.num_threads = threads
@@ -270,21 +313,10 @@ class ProcessMgr():
             'execution_threads': self.num_threads
         })
         progress.update(1)
-        self.progress_gradio((progress.n, self.total_frames), desc='Processing', total=self.total_frames, unit='frames')
+        if self.progress_gradio is not None:
+            self.progress_gradio((progress.n, self.total_frames), desc='Processing', total=self.total_frames, unit='frames')
 
 
-    def on_no_face_action(self, frame:Frame):
-        if roop.globals.no_face_action == 0:
-            return None, frame
-        elif roop.globals.no_face_action == 2:
-            return None, None
-
-        
-        faces = get_all_faces(frame)
-        if faces is not None:
-            return faces, frame
-        return None, frame
-      
 # https://github.com/deepinsight/insightface#third-party-re-implementation-of-arcface
 # https://github.com/deepinsight/insightface/blob/master/alignment/coordinate_reg/image_infer.py
 # https://github.com/deepinsight/insightface/issues/1350
@@ -292,32 +324,43 @@ class ProcessMgr():
 
 
     def process_frame(self, frame:Frame):
-        use_original_frame = 0
-        skip_frame = 2
-
-        if len(self.input_face_datas) < 1:
+        if len(self.input_face_datas) < 1 and not self.options.show_face_masking:
             return frame
         temp_frame = frame.copy()
         num_swapped, temp_frame = self.swap_faces(frame, temp_frame)
         if num_swapped > 0:
+            if roop.globals.no_face_action == eNoFaceAction.SKIP_FRAME_IF_DISSIMILAR:
+                if len(self.input_face_datas) > num_swapped:
+                    return None
             return temp_frame
-        if roop.globals.no_face_action == use_original_frame:
+        if roop.globals.no_face_action == eNoFaceAction.USE_ORIGINAL_FRAME:
             return frame
-        if roop.globals.no_face_action == skip_frame:
+        if roop.globals.no_face_action == eNoFaceAction.SKIP_FRAME:
             #This only works with in-mem processing, as it simply skips the frame.
             #For 'extract frames' it simply leaves the unprocessed frame unprocessed and it gets used in the final output by ffmpeg.
             #If we could delete that frame here, that'd work but that might cause ffmpeg to fail unless the frames are renamed, and I don't think we have the info on what frame it actually is?????
             #alternatively, it could mark all the necessary frames for deletion, delete them at the end, then rename the remaining frames that might work?
             return None
         else:
-            copyframe = frame.copy()
-            copyframe = rotate_image_180(copyframe)
-            temp_frame = copyframe.copy()
-            num_swapped, temp_frame = self.swap_faces(copyframe, temp_frame)
-            if num_swapped == 0:
-                return frame
-            temp_frame = rotate_image_180(temp_frame)
-            return temp_frame
+            return self.retry_rotated(frame)
+
+    def retry_rotated(self, frame):
+        copyframe = frame.copy()
+        copyframe = rotate_clockwise(copyframe)
+        temp_frame = copyframe.copy()
+        num_swapped, temp_frame = self.swap_faces(copyframe, temp_frame)
+        if num_swapped > 0:
+            return rotate_anticlockwise(temp_frame)
+        
+        copyframe = frame.copy()
+        copyframe = rotate_anticlockwise(copyframe)
+        temp_frame = copyframe.copy()
+        num_swapped, temp_frame = self.swap_faces(copyframe, temp_frame)
+        if num_swapped > 0:
+            return rotate_clockwise(temp_frame)
+        del copyframe
+        return frame
+        
 
 
     def swap_faces(self, frame, temp_frame):
@@ -343,7 +386,8 @@ class ProcessMgr():
                     del face
             
             elif self.options.swap_mode == "selected":
-                use_index = len(self.target_face_datas) == 1
+                num_targetfaces = len(self.target_face_datas) 
+                use_index = num_targetfaces == 1
                 for i,tf in enumerate(self.target_face_datas):
                     for face in faces:
                         if compute_cosine_distance(tf.embedding, face.embedding) <= self.options.face_distance_threshold:
@@ -353,9 +397,9 @@ class ProcessMgr():
                                 else:
                                     temp_frame = self.process_face(i, face, temp_frame)
                                 num_faces_found += 1
-                            if not roop.globals.vr_mode:
+                            del face
+                            if not roop.globals.vr_mode and num_faces_found == num_targetfaces:
                                 break
-                        del face
             elif self.options.swap_mode == "all_female" or self.options.swap_mode == "all_male":
                 gender = 'F' if self.options.swap_mode == "all_female" else 'M'
                 for face in faces:
@@ -371,13 +415,10 @@ class ProcessMgr():
         if num_faces_found == 0:
             return num_faces_found, frame
 
-        maskprocessor = next((x for x in self.processors if x.processorname == 'clip2seg'), None)
+        #maskprocessor = next((x for x in self.processors if x.type == 'mask'), None)
 
         if self.options.imagemask is not None and self.options.imagemask.shape == frame.shape:
             temp_frame = self.simple_blend_with_mask(temp_frame, frame, self.options.imagemask)
-
-        if maskprocessor is not None:
-            temp_frame = self.process_mask(maskprocessor, frame, temp_frame)
         return num_faces_found, temp_frame
 
 
@@ -446,8 +487,13 @@ class ProcessMgr():
 
 
     def process_face(self,face_index, target_face:Face, frame:Frame):
+        from roop.face_util import align_crop
+
         enhanced_frame = None
-        inputface = self.input_face_datas[face_index].faces[0]
+        if(len(self.input_face_datas) > 0):
+            inputface = self.input_face_datas[face_index].faces[0]
+        else:
+            inputface = None
 
         rotation_action = None
         if roop.globals.autorotate_faces:
@@ -496,12 +542,19 @@ class ProcessMgr():
             # img = vr.GetPerspective(frame, 90, theta, phi, 1280, 1280)  # Generate perspective image
 
         fake_frame = None
+        aligned_img, M = align_crop(frame, target_face.kps, 128)
+        fake_frame = aligned_img
+        swap_frame = aligned_img
+        target_face.matrix = M
         for p in self.processors:
             if p.type == 'swap':
-                fake_frame = p.Run(inputface, target_face, frame)
+                if inputface is not None:
+                    for _ in range(0,self.options.num_swap_steps):
+                        swap_frame = p.Run(inputface, target_face, swap_frame)
+                fake_frame = swap_frame
                 scale_factor = 0.0
             elif p.type == 'mask':
-                continue
+                fake_frame = self.process_mask(p, aligned_img, fake_frame)
             else:
                 enhanced_frame, scale_factor = p.Run(self.input_face_datas[face_index], target_face, fake_frame)
 
@@ -509,7 +562,7 @@ class ProcessMgr():
         orig_width = fake_frame.shape[1]
 
         fake_frame = cv2.resize(fake_frame, (upscale, upscale), cv2.INTER_CUBIC)
-        mask_offsets = inputface.mask_offsets
+        mask_offsets = (0,0,0,0,1,20) if inputface is None else inputface.mask_offsets
 
         
         if enhanced_frame is None:
@@ -579,7 +632,7 @@ class ProcessMgr():
         img_matte = img_matte.astype(np.float32)/255
         face_matte = face_matte.astype(np.float32)/255
         img_matte = np.minimum(face_matte, img_matte)
-        if self.options.show_mask:
+        if self.options.show_face_area_overlay:
             # Additional steps for green overlay
             green_overlay = np.zeros_like(target_img)
             green_color = [0, 255, 0]  # RGB for green
@@ -594,7 +647,7 @@ class ProcessMgr():
         # Re-assemble image
         paste_face = img_matte * paste_face
         paste_face = paste_face + (1-img_matte) * target_img.astype(np.float32)
-        if self.options.show_mask:
+        if self.options.show_face_area_overlay:
             # Overlay the green overlay on the final image
             paste_face = cv2.addWeighted(paste_face.astype(np.uint8), 1 - 0.5, green_overlay, 0.5, 0)
         return paste_face.astype(np.uint8)
@@ -624,6 +677,11 @@ class ProcessMgr():
         img_mask = processor.Run(frame, self.options.masking_text)
         img_mask = cv2.resize(img_mask, (target.shape[1], target.shape[0]))
         img_mask = np.reshape(img_mask, [img_mask.shape[0],img_mask.shape[1],1])
+
+        if self.options.show_face_masking:
+            result = (1 - img_mask) * frame.astype(np.float32)
+            return np.uint8(result)
+
 
         target = target.astype(np.float32)
         result = (1-img_mask) * target

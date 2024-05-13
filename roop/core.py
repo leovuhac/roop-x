@@ -122,10 +122,18 @@ def pre_check() -> bool:
     util.conditional_download(download_directory_path, ['https://github.com/csxmli2016/DMDNet/releases/download/v1/DMDNet.pth'])
     util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/GPEN-BFR-512.onnx'])
     util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/restoreformer_plus_plus.onnx'])
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/xseg.onnx'])
     download_directory_path = util.resolve_relative_path('../models/CLIP')
     util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/rd64-uni-refined.pth'])
     download_directory_path = util.resolve_relative_path('../models/CodeFormer')
     util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/CodeFormerv0.1.onnx'])
+    download_directory_path = util.resolve_relative_path('../models/Frame')
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/deoldify_artistic.onnx'])
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/deoldify_stable.onnx'])
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/isnet-general-use.onnx'])
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/real_esrgan_x4.onnx'])
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/real_esrgan_x2.onnx'])
+    util.conditional_download(download_directory_path, ['https://huggingface.co/countfloyd/deepfake/resolve/main/lsdir_x4.onnx'])
 
     if not shutil.which('ffmpeg'):
        update_status('ffmpeg is not installed.')
@@ -157,28 +165,28 @@ def start() -> None:
         # if 'face_enhancer' in roop.globals.frame_processors:
         #     roop.globals.selected_enhancer = 'GFPGAN'
        
-    batch_process(None, False, None)
+    batch_process_regular(None, False, None)
 
 
-def get_processing_plugins(use_clip):
-    processors = "faceswap"
-    if use_clip:
-        processors += ",mask_clip2seg"
+def get_processing_plugins(masking_engine):
+    processors = {  "faceswap": {}}
+    if masking_engine is not None:
+        processors.update({masking_engine: {}})
     
     if roop.globals.selected_enhancer == 'GFPGAN':
-        processors += ",gfpgan"
+        processors.update({"gfpgan": {}})
     elif roop.globals.selected_enhancer == 'Codeformer':
-        processors += ",codeformer"
+        processors.update({"codeformer": {}})
     elif roop.globals.selected_enhancer == 'DMDNet':
-        processors += ",dmdnet"
+        processors.update({"dmdnet": {}})
     elif roop.globals.selected_enhancer == 'GPEN':
-        processors += ",gpen"
+        processors.update({"gpen": {}})
     elif roop.globals.selected_enhancer == 'Restoreformer++':
-        processors += ",restoreformer++"
+        processors.update({"restoreformer++": {}})
     return processors
 
 
-def live_swap(frame, swap_mode, use_clip, clip_text, imagemask, show_mask, selected_index = 0):
+def live_swap(frame, options):
     global process_mgr
 
     if frame is None:
@@ -187,10 +195,8 @@ def live_swap(frame, swap_mode, use_clip, clip_text, imagemask, show_mask, selec
     if process_mgr is None:
         process_mgr = ProcessMgr(None)
     
-    if len(roop.globals.INPUT_FACESETS) <= selected_index:
-        selected_index = 0
-    options = ProcessOptions(get_processing_plugins(use_clip), roop.globals.distance_threshold, roop.globals.blend_ratio,
-                              swap_mode, selected_index, clip_text,imagemask, show_mask)
+#    if len(roop.globals.INPUT_FACESETS) <= selected_index:
+#        selected_index = 0
     process_mgr.initialize(roop.globals.INPUT_FACESETS, roop.globals.TARGET_FACES, options)
     newframe = process_mgr.process_frame(frame)
     if newframe is None:
@@ -198,28 +204,40 @@ def live_swap(frame, swap_mode, use_clip, clip_text, imagemask, show_mask, selec
     return newframe
 
 
-def preview_mask(frame, clip_text):
-    import numpy as np
-    global process_mgr
-    
-    maskimage = np.zeros((frame.shape), np.uint8)
+def batch_process_regular(files:list[ProcessEntry], masking_engine:str, new_clip_text:str, use_new_method, imagemask, num_swap_steps, progress, selected_index = 0) -> None:
+    global clip_text, process_mgr
+
+    release_resources()
+    limit_resources()
     if process_mgr is None:
-        process_mgr = ProcessMgr(None)
-    options = ProcessOptions("mask_clip2seg", roop.globals.distance_threshold, roop.globals.blend_ratio, "None", 0, clip_text, None)
+        process_mgr = ProcessMgr(progress)
+    mask = imagemask["layers"][0] if imagemask is not None else None
+    if len(roop.globals.INPUT_FACESETS) <= selected_index:
+        selected_index = 0
+    options = ProcessOptions(get_processing_plugins(masking_engine), roop.globals.distance_threshold, roop.globals.blend_ratio, roop.globals.face_swap_mode, selected_index, new_clip_text, mask, num_swap_steps, False)
     process_mgr.initialize(roop.globals.INPUT_FACESETS, roop.globals.TARGET_FACES, options)
-    maskprocessor = next((x for x in process_mgr.processors if x.processorname == 'clip2seg'), None)
-    return process_mgr.process_mask(maskprocessor, frame, maskimage)
-    
+    batch_process(files, use_new_method)
+    return
+
+def batch_process_with_options(files:list[ProcessEntry], options, progress):
+    global clip_text, process_mgr
+
+    release_resources()
+    limit_resources()
+    if process_mgr is None:
+        process_mgr = ProcessMgr(progress)
+    process_mgr.initialize(roop.globals.INPUT_FACESETS, roop.globals.TARGET_FACES, options)
+    roop.globals.keep_frames = False
+    roop.globals.wait_after_extraction = False
+    roop.globals.skip_audio = False
+    batch_process(files, True)
 
 
 
-
-def batch_process(files:list[ProcessEntry], use_clip, new_clip_text, use_new_method, imagemask, progress, selected_index = 0) -> None:
+def batch_process(files:list[ProcessEntry], use_new_method) -> None:
     global clip_text, process_mgr
 
     roop.globals.processing = True
-    release_resources()
-    limit_resources()
 
     # limit threads for some providers
     max_threads = suggest_execution_threads()
@@ -247,13 +265,6 @@ def batch_process(files:list[ProcessEntry], use_clip, new_clip_text, use_new_met
             videofiles.append(f)
 
 
-    if process_mgr is None:
-        process_mgr = ProcessMgr(progress)
-    mask = imagemask["layers"][0] if imagemask is not None else None
-    if len(roop.globals.INPUT_FACESETS) <= selected_index:
-        selected_index = 0
-    options = ProcessOptions(get_processing_plugins(use_clip), roop.globals.distance_threshold, roop.globals.blend_ratio, roop.globals.face_swap_mode, selected_index, new_clip_text, mask)
-    process_mgr.initialize(roop.globals.INPUT_FACESETS, roop.globals.TARGET_FACES, options)
 
     if(len(imagefiles) > 0):
         update_status('Processing image(s)')

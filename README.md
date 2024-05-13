@@ -14,8 +14,8 @@ Uncensored Deepfakes for images and videos without training and an easy-to-use G
 - Selection of multiple input/output faces in one go
 - Many different swapping modes, first detected, face selections, by gender
 - Batch processing of images/videos
-- Masking of face occluders using text prompts
-- Optional Face Restoration using different enhancers
+- Masking of face occluders using text prompts or automatically
+- Optional Face Upscaler/Restoration using different enhancers
 - Preview swapping from different video frames
 - Live Fake Cam using your webcam
 - Extras Tab for cutting videos etc.
@@ -35,7 +35,7 @@ In the event of violation of the legal and ethical requirements of the user's co
 
 ### Installation
 
-Please refer to the Wiki.
+Please refer to the [wiki](https://github.com/C0untFloyd/roop-unleashed/wiki).
 
 
 
@@ -58,6 +58,18 @@ Additional commandline arguments are currently unsupported and settings should b
 
 
 ### Changelog
+
+**22.04.2024** v3.9.0
+
+- Bugfix: Face detection bounding box corrupt values at weird angles
+- Rewrote mask previewing to work with every model
+- Switching mask engines toggles text interactivity
+- Clearing target files, resets face selection dropdown
+- Massive rewrite of swapping architecture, needed for xseg implementation
+- Added DFL Xseg Support for partial face occlusion
+- Face masking only runs when there is a face detected
+- Removed unnecessary toggle checkbox for text masking
+
 
 **22.03.2024** v3.6.5
 
@@ -126,16 +138,18 @@ Initial Gradio Version - old TkInter Version now deprecated
 
 # Acknowledgements
 
-Lots of ideas, code or pre-trained models used from the following projects:
+Lots of ideas, code or pre-trained models borrowed from the following projects:
 
 https://github.com/deepinsight/insightface<br />
 https://github.com/s0md3v/roop<br />
 https://github.com/AUTOMATIC1111/stable-diffusion-webui<br /> 
 https://github.com/Hillobar/Rope<br />
-https://github.com/janvarev/chain-img-processor<br />
 https://github.com/TencentARC/GFPGAN<br />   
 https://github.com/kadirnar/codeformer-pip<br />
 https://github.com/csxmli2016/DMDNet<br />
+https://github.com/glucauze/sd-webui-faceswaplab<br />
+https://github.com/ykk648/face_power<br />
+
 <br />
 <br />
 Thanks to all developers!

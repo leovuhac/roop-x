@@ -80,6 +80,7 @@ def extract_face_images(source_filename, video_info, extra_padding=-1.0):
     i = 0
     for face in faces:
         (startX, startY, endX, endY) = face["bbox"].astype("int")
+        startX, endX, startY, endY = clamp_cut_values(startX, endX, startY, endY, source_image)
         if extra_padding > 0.0:
             if source_image.shape[:2] == (512, 512):
                 i += 1
@@ -89,6 +90,7 @@ def extract_face_images(source_filename, video_info, extra_padding=-1.0):
             found = False
             for i in range(1, 3):
                 (startX, startY, endX, endY) = face["bbox"].astype("int")
+                startX, endX, startY, endY = clamp_cut_values(startX, endX, startY, endY, source_image)
                 cutout_padding = extra_padding
                 # top needs extra room for detection
                 padding = int((endY - startY) * cutout_padding)
@@ -138,30 +140,6 @@ def clamp_cut_values(startX, endX, startY, endY, image):
         endY = image.shape[0]
     return startX, endX, startY, endY
 
-
-def get_face_swapper() -> Any:
-    global FACE_SWAPPER
-
-    with THREAD_LOCK_SWAPPER:
-        if FACE_SWAPPER is None:
-            model_path = resolve_relative_path("../models/inswapper_128.onnx")
-            FACE_SWAPPER = insightface.model_zoo.get_model(
-                model_path, providers=roop.globals.execution_providers
-            )
-    return FACE_SWAPPER
-
-
-def pre_check() -> bool:
-    download_directory_path = resolve_relative_path("../models")
-    conditional_download(
-        download_directory_path,
-        ["https://huggingface.co/countfloyd/deepfake/resolve/main/inswapper_128.onnx"],
-    )
-    return True
-
-
-def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
-    return get_face_swapper().get(temp_frame, target_face, source_face, paste_back=True)
 
 
 def face_offset_top(face: Face, offset):
@@ -249,14 +227,9 @@ def estimate_norm(lmk, image_size=112, mode="arcface"):
     return M
 
 
-def norm_crop(img, landmark, image_size=112, mode="arcface"):
-    M = estimate_norm(landmark, image_size, mode)
-    warped = cv2.warpAffine(img, M, (image_size, image_size), borderValue=0.0)
-    return warped
-
 
 # aligned, M = norm_crop2(f[1], face.kps, 512)
-def norm_crop2(img, landmark, image_size=112, mode="arcface"):
+def align_crop(img, landmark, image_size=112, mode="arcface"):
     M = estimate_norm(landmark, image_size, mode)
     warped = cv2.warpAffine(img, M, (image_size, image_size), borderValue=0.0)
     return warped, M
